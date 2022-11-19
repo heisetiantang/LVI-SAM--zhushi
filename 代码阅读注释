@@ -1,0 +1,109 @@
+utility:头文件
+设备：十六线的Velodyne雷达、FLIR BFS-U3-04S2M-CS的单目相机、MicroStrain 3DM-GX5-25的IMU、Reach RS+ GPS、Intel i7-10710U in Ubuntu Linux
+
+作者在三个自己录制的数据集上进行了测试都取得了很不错的效果。
+
+
+/ Velodyne雷达的参数，会在文件中程序中检查是否有这些参数
+/ Velodyne
+struct PointXYZIRT
+{
+    PCL_ADD_POINT4D
+    PCL_ADD_INTENSITY;
+    uint16_t ring;
+    float time;
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+} EIGEN_ALIGN16;
+
+POINT_CLOUD_REGISTER_POINT_STRUCT (PointXYZIRT,  
+    (float, x, x) (float, y, y) (float, z, z) (float, intensity, intensity)
+    (uint16_t, ring, ring) (float, time, time)
+)
+
+// Ouster
+// struct PointXYZIRT {
+//     PCL_ADD_POINT4D;
+//     float intensity;
+//     uint32_t t;
+//     uint16_t reflectivity;
+//     uint8_t ring;
+//     uint16_t noise;
+//     uint32_t range;
+//     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+// }EIGEN_ALIGN16;
+
+// POINT_CLOUD_REGISTER_POINT_STRUCT(PointXYZIRT,
+//     (float, x, x) (float, y, y) (float, z, z) (float, intensity, intensity)
+//     (uint32_t, t, t) (uint16_t, reflectivity, reflectivity)
+//     (uint8_t, ring, ring) (uint16_t, noise, noise) (uint32_t, range, range)
+// )
+
+
+激光lidar模块
+/lvi_sam_imuPreintegration(IMU预积分节点)，
+/lvi_sam_featureExtraction(激光雷达特征点提取节点) 
+/lvi_sam_imageProjection(生成深度图)
+/lvi_sam_mapOptmization(因子图优化节点)
+
+视觉
+节点lvi_sam_visual_feature
+输入原始图像信息sub_img和上一个imageProjection节点变换到世界坐标系的当前点云信息sub_lidar
+输出是给出一个带有深度的特征点pub_feature和带有特征点的图片pub_match和是否重启的信号pub_restart.
+
+
+
+
+沒看懂
+1.
+        extRot = Eigen::Map<const Eigen::Matrix<double, -1, -1, Eigen::RowMajor>>(extRotV.data(), 3, 3);
+        extRPY = Eigen::Map<const Eigen::Matrix<double, -1, -1, Eigen::RowMajor>>(extRPYV.data(), 3, 3);
+        extTrans = Eigen::Map<const Eigen::Matrix<double, -1, -1, Eigen::RowMajor>>(extTransV.data(), 3, 1);
+        extQRPY = Eigen::Quaterniond(extRPY);
+
+2.   
+     subImu        = nh.subscribe<sensor_msgs::Imu>        (imuTopic, 2000, &ImageProjection::imuHandler, this, ros::TransportHints().tcpNoDelay());//多线程时使用ros::TransportHints().tcpNoDelay()
+3.
+        transStartInverse = (pcl::getTransformation(posXCur, posYCur, posZCur, rotXCur, rotYCur, rotZCur)).inverse();
+        firstPointFlag = false;
+
+4. 
+void findRotation(double pointTime, float *rotXCur, float *rotYCur, float *rotZCur)
+
+5.
+#rolling shutter parameters滚动快门参数？？
+rolling_shutter: 0       # 0: global shutter camera, 1: rolling shutter camera
+rolling_shutter_tr: 0    # unit: s. rolling shutter read out time per frame (from data sheet). 
+
+6.
+// pcl::PointCloud<PointType>::Ptr laser_cloud_in_filter(new pcl::PointCloud<PointType>());
+//     // 遍历所有的点
+//     for (int i = 0; i < (int)laser_cloud_in->size(); ++i)
+//     {
+//         PointType p = laser_cloud_in->points[i];
+//         // 符合条件的数据，放入laser_cloud_in_filter
+//         if (p.x >= 0 && abs(p.y / p.x) <= 10 && abs(p.z / p.x) <= 10)  在相机的视锥范围内，x轴从镜口垂直向外
+//             laser_cloud_in_filter->push_back(p);
+//     }
+//     *laser_cloud_in = *laser_cloud_in_filter;
+
+
+7.
+for (int i = 0; i < (int)features_2d.size(); ++i)
+        {
+            // normalize 2d feature to a unit sphere// 归一化2d特征到单位球体上
+            Eigen::Vector3f feature_cur(features_2d[i].x, features_2d[i].y, features_2d[i].z); // z always equal to 1
+            feature_cur.normalize(); //归一化函数
+            // convert to ROS standard  // 转换为ROS的标准
+            PointType p;
+            p.x =  feature_cur(2);
+            p.y = -feature_cur(0);
+            p.z = -feature_cur(1);
+            p.intensity = -1; // intensity will be used to save depth
+            features_3d_sphere->push_back(p);
+        }
+
+
+8.
+float row_angle = atan2(p.z, sqrt(p.x * p.x + p.y * p.y)) * 180.0 / M_PI + 90.0; 为什么加90
+            int row_id = round(row_angle / bin_res);
+            // find column id in range image// 在图像的范围中找到列号
