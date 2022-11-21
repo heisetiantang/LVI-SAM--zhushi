@@ -6,6 +6,7 @@ Estimator::Estimator(): f_manager{Rs}
     clearState();
 }
 
+//它读取了每一个相机到IMU坐标系的 [旋转/平移外参数] 和 [非线性优化的重投影误差部分的信息矩阵]
 void Estimator::setParameter()
 {
     for (int i = 0; i < NUM_OF_CAM; i++)
@@ -79,27 +80,42 @@ void Estimator::clearState()
     failure_occur = 0;
 }
 
-//时间间隔 线加速度 角速度
+//根据时间间隔 线加速度 角速度，计算当前图像帧间的imu预积分值，即帧间平移，旋转，速度，以及bias；
 void Estimator::processIMU(double dt, const Vector3d &linear_acceleration, const Vector3d &angular_velocity)
 {
+    /*这一段作用就是就是给以下数据提供初始值/初始化：
+   * 
+   *pre_integrations[frame_count]
+   *dt_buf[frame_count]
+   *linear_acceleration_buf[frame_count]
+   *angular_velocity_buf[frame_count]
+   *Rs[frame_count]
+   *PS[frame_count]
+   *Vs[frame_count] 
+   * 
+   * TODO 关于frame_count的更新，目前只在process_img里的solver_flag == INITIAL这里看到?
+   * 
+   */
+    //边界判断：如果当前帧不是第一帧IMU，那么就把它看成第一个IMU，而且把他的值取出来作为初始值
     if (!first_imu)
     {
         first_imu = true;
         acc_0 = linear_acceleration;
         gyr_0 = angular_velocity;
     }
-
+    //边界判断：如果当前IMU帧没有构造IntegrationBase，那就构造一个，后续会用上
     if (!pre_integrations[frame_count]) //滑动窗口第一帧是起点帧，没有预积分值
     {
         //IntegrationBase预计分类
         pre_integrations[frame_count] = new IntegrationBase{acc_0, gyr_0, Bas[frame_count], Bgs[frame_count]};
     }
+    //核心操作
     if (frame_count != 0)  // 滑动窗口执行期间
     {
         //imu->预积分
         pre_integrations[frame_count]->push_back(dt, linear_acceleration, angular_velocity);
-
         tmp_pre_integration->push_back(dt, linear_acceleration, angular_velocity);
+        
         //放数据进对应的buff
         dt_buf[frame_count].push_back(dt);
         linear_acceleration_buf[frame_count].push_back(linear_acceleration);

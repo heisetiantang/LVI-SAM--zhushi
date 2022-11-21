@@ -103,21 +103,25 @@ void update()
         predict(tmp_imu_buf.front());
 }
 
+//这个函数的作用就是 把图像帧 和 对应的IMU数据们 配对起来,而且IMU数据时间是在图像帧的前面
 std::vector<std::pair<std::vector<sensor_msgs::ImuConstPtr>, sensor_msgs::PointCloudConstPtr>>
 getMeasurements()
 {
     std::vector<std::pair<std::vector<sensor_msgs::ImuConstPtr>, sensor_msgs::PointCloudConstPtr>> measurements;
 
-    while (ros::ok())
+    while (ros::ok())//边界判断：数据取完了，说明配对完成
     {
         //两个中有一个为空则跳出循环
         if (imu_buf.empty() || feature_buf.empty())
             return measurements;
+        
+        //边界判断：IMU buf里面所有数据的时间戳都比img buf第一个帧时间戳要早，说明缺乏IMU数据，需要等待IMU数据
         //imu 太慢 ，整个imu太老，等新的imu数据
         if (!(imu_buf.back()->header.stamp.toSec() > feature_buf.front()->header.stamp.toSec() + estimator.td))
         {
-            return measurements;
+            return measurements;//统计等待的次数
         }
+        //边界判断：IMU第一个数据的时间要大于第一个图像特征数据的时间(说明图像帧有多的)
         //图像太老，扔掉最老图(有取反)
         if (!(imu_buf.front()->header.stamp.toSec() < feature_buf.front()->header.stamp.toSec() + estimator.td))
         {
@@ -125,16 +129,18 @@ getMeasurements()
             feature_buf.pop();
             continue; 
         }
-        //
+        //核心操作：装入视觉帧信息
         sensor_msgs::PointCloudConstPtr img_msg = feature_buf.front();
         feature_buf.pop();
-
+        //核心操作：转入IMU信息
         std::vector<sensor_msgs::ImuConstPtr> IMUs;
         while (imu_buf.front()->header.stamp.toSec() < img_msg->header.stamp.toSec() + estimator.td)
         {
             IMUs.emplace_back(imu_buf.front());
             imu_buf.pop();
         }
+        //注意：把最后一个IMU帧又放回到imu_buf里去了
+        //原因：最后一帧IMU信息是被相邻2个视觉帧共享的
         IMUs.emplace_back(imu_buf.front());
         if (IMUs.empty())
             ROS_WARN("no imu between two image");
@@ -143,7 +149,10 @@ getMeasurements()
     return measurements;
 }
 
-//将imu_msg保存到imu_buf，IMU状态递推并发布[P,Q,V,header, failureCount].
+//将imu_msg保存到imu_buf，
+//IMU状态递推并发布[P,Q,V,header, failureCount]
+//就是如果当前处于非线性优化阶段的话，需要把第二件事计算得到的PVQ发布到rviz里去
+
 //imu_callback：获取IMU原始信息，中值积分算位姿，用于下一帧图像未到来之前的高频位姿；
 void imu_callback(const sensor_msgs::ImuConstPtr &imu_msg)
 {
@@ -182,22 +191,23 @@ void odom_callback(const nav_msgs::Odometry::ConstPtr& odom_msg)
     m_odom.unlock();
 }
 
+//把cur帧的所有特征点放到feature_buf里，同样需要上锁。注意，cur帧的所有特征点都是整合在一个数据里的，
 //feature_callback：获取feature_tracker_node输出的3D特征点；对于第一帧图像是认为没有光流速度的，所以，没有办法追踪并找到特征点。后面的话，也是把消息放到缓冲区内
 void feature_callback(const sensor_msgs::PointCloudConstPtr &feature_msg)
 {
     if (!init_feature)//跳过第一帧
     {
-        //skip the first detected feature, which doesn't contain optical flow speed
         init_feature = 1;
         return;
     }
     m_buf.lock();
-    feature_buf.push(feature_msg);//放入buffer队列中
+    feature_buf.push(feature_msg);//放入buffer队列中,需要上锁
     m_buf.unlock();
     con.notify_one();
 }
 
 //restart_callback：如果相机流不稳定，重启VIO部分；
+//把所有状态量归零，把buf里的数据全部清空。
 void restart_callback(const std_msgs::BoolConstPtr &restart_msg)
 {
     if (restart_msg->data == true)
@@ -219,16 +229,28 @@ void restart_callback(const std_msgs::BoolConstPtr &restart_msg)
     return;
 }
 
-// thread: visual-inertial odometry
+// 视觉惯性里程计(核心)
 //process()：处理IMU，odom，feature信息，完成VIO融合估计位姿。
 void process()
 {
     while (ros::ok())//process里面只有一个while循环，运行条件为ros::ok()
     {
-        //定义一个数据结构    存储imu向量和当前图像帧   的组合数据格式measurements;
+        //定义一个数据结构
+        /*
+        数据结构: measurements
+        1、首先，measurements他自己就是一个vector；
+        2、对于measurements中的每一个measurement，又由2部分组成；
+        3、第一部分，由sensor_msgs::ImuConstPtr组成的vector；
+        4、第二部分，一个sensor_msgs::PointCloudConstPtr；
+        5、这两个sensor_msgs见3.1-6部分介绍。
+        6、为什么要这样配对(一个PointCloudConstPtr配上若干个ImuConstPtr)？
+        因为IMU的频率比视觉帧的发布频率要高，所以说在这里，需要把一个视觉帧和之前的一串IMU帧的数据配对起来。 
+        */
+        //    存储imu向量和当前图像帧   的组合数据格式measurements;
         std::vector<std::pair<std::vector<sensor_msgs::ImuConstPtr>, sensor_msgs::PointCloudConstPtr>> measurements;
+       
+        //多线程上锁不冲突
         std::unique_lock<std::mutex> lk(m_buf);
-        //多线程不冲突
         con.wait(lk, [&]
                  {//对齐时间
             return (measurements = getMeasurements()).size() != 0;//当前时刻特征和imu数据
@@ -237,16 +259,21 @@ void process()
 
         m_estimator.lock();
         //循环processIMU->push_back->propagate->midPointIntegration
+        //2、对measurements中的每一个measurement (IMUs,IMG)组合进行操作
         for (auto &measurement : measurements)
         {
+            //2.1、对于measurement中的每一个imu_msg，计算dt并执行processIMU()
             auto img_msg = measurement.second;//取出图像
 
             // 1. IMU pre-integration imu预积分
             double dx = 0, dy = 0, dz = 0, rx = 0, ry = 0, rz = 0;
             for (auto &imu_msg : measurement.first)
-            {
+            {   
+                //IMU时间戳
                 double t = imu_msg->header.stamp.toSec();
+                //相机和IMU同步校准得到的时间差
                 double img_t = img_msg->header.stamp.toSec() + estimator.td;
+                //对于大多数情况，IMU的时间戳都会比img的早，此时直接选取IMU的数据就行
                 if (t <= img_t)
                 { 
                     //对于比图像早的imu
@@ -261,13 +288,15 @@ void process()
                     rx = imu_msg->angular_velocity.x;
                     ry = imu_msg->angular_velocity.y;
                     rz = imu_msg->angular_velocity.z;
+                    //这里干了2件事，IMU粗略地预积分，然后把值传给一个新建的IntegrationBase对象
                     // 计算当前图像帧间的imu预积分值，即帧间平移，旋转，速度，以及bias；
                     // 并利用imu对系统最新状态进行传播，为视觉三角化及重投影提供位姿初值；
                     estimator.processIMU(dt, Vector3d(dx, dy, dz), Vector3d(rx, ry, rz));
                     //对当前图像进行预测，同时得到上一时刻和当前的运动增量
                     //printf("imu: dt:%f a: %f %f %f w: %f %f %f\n",dt, dx, dy, dz, rx, ry, rz);
                 }
-                else//t>img_t 差值处理
+                 //对于处于边界位置的IMU数据，是被相邻两帧共享的，而且对前一帧的影响会大一些，在这里，对数据线性分配
+                else//t>img_t 差值处理//每个大于图像帧时间戳的第一个imu_msg是被两个图像帧共用的(出现次数少)
                 {   
                     //两个图像帧公用一个imu数据
                     double dt_1 = img_t - current_time;
@@ -354,10 +383,10 @@ int main(int argc, char **argv)//从上一部分读取特征点
     ROS_INFO("\033[1;32m----> Visual Odometry Estimator Started.\033[0m");
     ros::console::set_logger_level(ROSCONSOLE_DEFAULT_NAME, ros::console::levels::Warn);
 
-    readParameters(n);//由于发布的内容较多，因此，这个节点的发布工作由readParameters(n)函数
+    readParameters(n);//读取参数，由于发布的内容较多，因此，这个节点的发布工作由readParameters(n)函数
     estimator.setParameter();// 设置参数,这里其中一个是设置计时器的参数。另外是，设置视觉测量残差的协方差矩阵
 
-    registerPub(n);// 注册发布的话题
+    registerPub(n);// 注册发布的话题,发布用于RVIZ显示的Topic
 
     odomRegister = new odometryRegister(n);//把里程计信息从lidar帧的坐标系转到VINS视觉图像帧的坐标系
 
