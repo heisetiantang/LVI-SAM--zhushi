@@ -68,5 +68,6 @@
         "bitset": "cpp",
         "random": "cpp",
         "optional": "cpp"
-    }
+    },
+    "ros.distro": "melodic"
 }
